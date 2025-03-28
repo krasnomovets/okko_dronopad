@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const zlib = require('zlib');
 
 // Create data directory and file paths
 const repoRoot = process.cwd();
@@ -15,7 +16,7 @@ const browserHeaders = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
   'Accept-Language': 'en-US,en;q=0.9',
-  'Accept-Encoding': 'gzip, deflate, br',
+  // Remove Accept-Encoding to prevent compression
   'Connection': 'keep-alive',
   'Referer': 'https://savelife.in.ua/',
   'Sec-Fetch-Dest': 'document',
@@ -33,6 +34,8 @@ function fetchPage(url) {
     }, (res) => {
       const { statusCode, headers } = res;
       console.log(`Status Code: ${statusCode}`);
+      console.log('Content-Type:', headers['content-type']);
+      console.log('Content-Encoding:', headers['content-encoding']);
       
       // Handle redirects
       if (statusCode >= 300 && statusCode < 400 && headers.location) {
@@ -45,9 +48,35 @@ function fetchPage(url) {
         return reject(new Error(`Status code: ${statusCode}`));
       }
       
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => resolve(data));
+      let data = [];
+      res.on('data', (chunk) => data.push(chunk));
+      res.on('end', () => {
+        const buffer = Buffer.concat(data);
+        
+        // Handle different content encodings
+        try {
+          let content;
+          if (headers['content-encoding'] === 'br') {
+            console.log('Content is Brotli compressed, but Node.js might not support decompression');
+            // Just store the raw buffer for now
+            content = buffer.toString();
+          } else if (headers['content-encoding'] === 'gzip') {
+            console.log('Content is gzip compressed, decompressing');
+            content = zlib.gunzipSync(buffer).toString();
+          } else if (headers['content-encoding'] === 'deflate') {
+            console.log('Content is deflate compressed, decompressing');
+            content = zlib.inflateSync(buffer).toString();
+          } else {
+            console.log('Content is not compressed');
+            content = buffer.toString();
+          }
+          resolve(content);
+        } catch (error) {
+          console.error('Error processing response:', error);
+          // Return the raw buffer as a fallback
+          resolve(buffer.toString());
+        }
+      });
     });
     
     req.on('error', reject);
@@ -62,6 +91,38 @@ function saveDebugHtml(html) {
   console.log(`Debug HTML saved to ${debugFile}`);
 }
 
+// Alternative approach: fetch directly from Okko
+function fetchOkkoData() {
+  return new Promise((resolve, reject) => {
+    const okkoUrl = 'https://dronopad.okko.ua/';
+    const req = https.get(okkoUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/json',
+        'Origin': 'https://savelife.in.ua',
+        'Referer': 'https://savelife.in.ua/'
+      }
+    }, (res) => {
+      console.log(`Okko API Status Code: ${res.statusCode}`);
+      
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        try {
+          const jsonData = JSON.parse(data);
+          resolve(jsonData);
+        } catch (e) {
+          console.log('Failed to parse JSON, trying to extract from HTML');
+          resolve(data);
+        }
+      });
+    });
+    
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 async function main() {
   // Initialize with empty or existing data
   let currentData = { progress: { total: 0 }, timestamp: new Date().toISOString() };
@@ -72,56 +133,81 @@ async function main() {
   }
   
   try {
-    console.log('Fetching the Dronopad page...');
-    const html = await fetchPage('https://savelife.in.ua/dronopad/');
-    console.log(`Received HTML (${html.length} characters)`);
+    // Try the direct Okko approach first
+    console.log('Fetching data directly from Okko...');
+    const okkoData = await fetchOkkoData();
+    console.log('Okko response:', typeof okkoData === 'string' ? 'HTML/Text' : 'JSON');
     
-    // Save HTML for debugging
-    saveDebugHtml(html);
-    
-    // Looking for the counter div with class counter-content
-    console.log('Looking for counter-content div...');
-    
-    // Method 1: Look for the exact div structure
-    const counterDivRegex = /<div[^>]*class="counter-content"[^>]*>[\s\S]*?<span[^>]*>([\d\s]+)<\/span>/i;
-    const counterMatch = html.match(counterDivRegex);
-    
-    if (counterMatch && counterMatch[1]) {
-      const amountStr = counterMatch[1].replace(/\s+/g, '');
-      const amount = parseInt(amountStr);
-      console.log(`Found amount in counter div: ${amount}`);
-      
-      if (amount > 0) {
-        currentData.progress = { total: amount };
-        currentData.timestamp = new Date().toISOString();
-        currentData.source = 'counter_div';
-      }
+    if (typeof okkoData === 'object' && okkoData.progress && okkoData.progress.total) {
+      console.log(`Found total in Okko API: ${okkoData.progress.total}`);
+      currentData.progress = okkoData.progress;
+      currentData.timestamp = new Date().toISOString();
+      currentData.source = 'okko_api';
     } else {
-      console.log('Counter div not found, trying alternative method...');
+      // Fallback to fetching the page
+      console.log('Fetching the Dronopad page...');
       
-      // Method 2: Look for text "ЗІБРАНО НА ОККО" and nearby numbers
-      const okkoTextRegex = /ЗІБРАНО НА ОККО[\s\S]*?<span[^>]*>([\d\s]+)<\/span>/i;
-      const okkoMatch = html.match(okkoTextRegex);
+      // Change the URL to use Google's cache as a workaround for Brotli compression
+      const html = await fetchPage('https://webcache.googleusercontent.com/search?q=cache:https://savelife.in.ua/dronopad/');
+      console.log(`Received HTML (${html.length} characters)`);
       
-      if (okkoMatch && okkoMatch[1]) {
-        const amountStr = okkoMatch[1].replace(/\s+/g, '');
-        const amount = parseInt(amountStr);
-        console.log(`Found amount near ЗІБРАНО НА ОККО text: ${amount}`);
-        
-        if (amount > 0) {
-          currentData.progress = { total: amount };
-          currentData.timestamp = new Date().toISOString();
-          currentData.source = 'okko_text';
+      // Save HTML for debugging
+      saveDebugHtml(html);
+      
+      // Extract the amount using regular expressions
+      console.log('Looking for amount in HTML...');
+      
+      // Try several patterns that might match the amount
+      const patterns = [
+        /<div[^>]*class="counter-content"[^>]*>[\s\S]*?<span[^>]*>([\d\s]+)<\/span>/i,
+        /ЗІБРАНО НА ОККО[\s\S]*?<span[^>]*>([\d\s]+)<\/span>/i,
+        /₴\s*<span[^>]*>([\d\s]+)<\/span>/i,
+        /<span[^>]*>([\d\s]{7,})<\/span>/g  // Look for any span with a number-like content
+      ];
+      
+      for (const pattern of patterns) {
+        let match;
+        if (pattern.global) {
+          // For global patterns, test each match
+          while ((match = pattern.exec(html)) !== null) {
+            const amountStr = match[1].replace(/\s+/g, '');
+            if (/^\d+$/.test(amountStr)) {
+              const amount = parseInt(amountStr);
+              console.log(`Found potential amount: ${amount}`);
+              
+              if (amount > 1000000) {  // Must be over a million to be valid
+                currentData.progress = { total: amount };
+                currentData.timestamp = new Date().toISOString();
+                currentData.source = 'html_pattern';
+                break;
+              }
+            }
+          }
+        } else {
+          // For non-global patterns
+          match = html.match(pattern);
+          if (match && match[1]) {
+            const amountStr = match[1].replace(/\s+/g, '');
+            if (/^\d+$/.test(amountStr)) {
+              const amount = parseInt(amountStr);
+              console.log(`Found amount: ${amount}`);
+              
+              if (amount > 1000000) {  // Must be over a million to be valid
+                currentData.progress = { total: amount };
+                currentData.timestamp = new Date().toISOString();
+                currentData.source = 'html_pattern';
+                break;
+              }
+            }
+          }
         }
-      } else {
-        console.log('Could not find amount near ЗІБРАНО НА ОККО text');
       }
     }
     
     console.log('Final data to save:', currentData);
     
   } catch (error) {
-    console.error('Error fetching or processing the page:', error);
+    console.error('Error fetching or processing data:', error);
   }
   
   // Save data file, even if we couldn't update it (to preserve timestamp)
