@@ -3,6 +3,7 @@ name: Fetch Okko Data
 on:
   schedule:
     - cron: '*/30 * * * *'  # Run every 30 minutes
+    workflow_dispatch: 
 
 jobs:
   fetch-data:
