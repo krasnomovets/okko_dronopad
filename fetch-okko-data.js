@@ -33,7 +33,6 @@ function fetchPage(url) {
     }, (res) => {
       const { statusCode, headers } = res;
       console.log(`Status Code: ${statusCode}`);
-      console.log('Headers:', headers);
       
       // Handle redirects
       if (statusCode >= 300 && statusCode < 400 && headers.location) {
@@ -56,6 +55,13 @@ function fetchPage(url) {
   });
 }
 
+// Save HTML for debugging
+function saveDebugHtml(html) {
+  const debugFile = path.join(dataDir, 'debug-page.html');
+  fs.writeFileSync(debugFile, html);
+  console.log(`Debug HTML saved to ${debugFile}`);
+}
+
 async function main() {
   // Initialize with empty or existing data
   let currentData = { progress: { total: 0 }, timestamp: new Date().toISOString() };
@@ -70,48 +76,45 @@ async function main() {
     const html = await fetchPage('https://savelife.in.ua/dronopad/');
     console.log(`Received HTML (${html.length} characters)`);
     
-    // Try different ways to extract the Okko total amount
+    // Save HTML for debugging
+    saveDebugHtml(html);
     
-    // Method 1: Look for data-okko-total-amount attribute
-    let dataMatch = html.match(/data-okko-total-amount[^>]*>([0-9 ]+)</);
-    if (dataMatch && dataMatch[1]) {
-      const totalAmount = parseInt(dataMatch[1].replace(/\s+/g, ''));
-      console.log('Method 1 - Found total amount:', totalAmount);
+    // Looking for the counter div with class counter-content
+    console.log('Looking for counter-content div...');
+    
+    // Method 1: Look for the exact div structure
+    const counterDivRegex = /<div[^>]*class="counter-content"[^>]*>[\s\S]*?<span[^>]*>([\d\s]+)<\/span>/i;
+    const counterMatch = html.match(counterDivRegex);
+    
+    if (counterMatch && counterMatch[1]) {
+      const amountStr = counterMatch[1].replace(/\s+/g, '');
+      const amount = parseInt(amountStr);
+      console.log(`Found amount in counter div: ${amount}`);
       
-      if (totalAmount > 0) {
-        currentData.progress = { total: totalAmount };
+      if (amount > 0) {
+        currentData.progress = { total: amount };
         currentData.timestamp = new Date().toISOString();
-        currentData.source = 'html_scrape_method1';
+        currentData.source = 'counter_div';
       }
-    }
-    
-    // Method 2: Look for JavaScript initialization with the value
-    if (currentData.progress.total === 0) {
-      dataMatch = html.match(/socket\.on\('total'[\s\S]*?total\s*=\s*([0-9]+)/);
-      if (dataMatch && dataMatch[1]) {
-        const totalAmount = parseInt(dataMatch[1]);
-        console.log('Method 2 - Found total amount:', totalAmount);
+    } else {
+      console.log('Counter div not found, trying alternative method...');
+      
+      // Method 2: Look for text "ЗІБРАНО НА ОККО" and nearby numbers
+      const okkoTextRegex = /ЗІБРАНО НА ОККО[\s\S]*?<span[^>]*>([\d\s]+)<\/span>/i;
+      const okkoMatch = html.match(okkoTextRegex);
+      
+      if (okkoMatch && okkoMatch[1]) {
+        const amountStr = okkoMatch[1].replace(/\s+/g, '');
+        const amount = parseInt(amountStr);
+        console.log(`Found amount near ЗІБРАНО НА ОККО text: ${amount}`);
         
-        if (totalAmount > 0) {
-          currentData.progress = { total: totalAmount };
+        if (amount > 0) {
+          currentData.progress = { total: amount };
           currentData.timestamp = new Date().toISOString();
-          currentData.source = 'html_scrape_method2';
+          currentData.source = 'okko_text';
         }
-      }
-    }
-    
-    // Method 3: Look for a JSON structure with the data
-    if (currentData.progress.total === 0) {
-      dataMatch = html.match(/progress["'\s]*:[\s]*{[^}]*total["'\s]*:[\s]*([0-9]+)/);
-      if (dataMatch && dataMatch[1]) {
-        const totalAmount = parseInt(dataMatch[1]);
-        console.log('Method 3 - Found total amount:', totalAmount);
-        
-        if (totalAmount > 0) {
-          currentData.progress = { total: totalAmount };
-          currentData.timestamp = new Date().toISOString();
-          currentData.source = 'html_scrape_method3';
-        }
+      } else {
+        console.log('Could not find amount near ЗІБРАНО НА ОККО text');
       }
     }
     
