@@ -1,92 +1,129 @@
 const fs = require('fs');
 const path = require('path');
-const socketIO = require('socket.io-client');
+const https = require('https');
 
-// Use absolute paths based on the repository root
+// Create data directory and file paths
 const repoRoot = process.cwd();
 const dataDir = path.join(repoRoot, 'data');
-
-// Create data directory if it doesn't exist
-console.log(`Creating data directory at: ${dataDir}`);
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir);
-  console.log('Data directory created successfully');
+}
+const dataFile = path.join(dataDir, 'okko-data.json');
+
+// Full browser-like headers
+const browserHeaders = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Connection': 'keep-alive',
+  'Referer': 'https://savelife.in.ua/',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'same-origin',
+  'Sec-Fetch-User': '?1',
+  'Upgrade-Insecure-Requests': '1',
+  'Cache-Control': 'max-age=0'
+};
+
+function fetchPage(url) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: browserHeaders
+    }, (res) => {
+      const { statusCode, headers } = res;
+      console.log(`Status Code: ${statusCode}`);
+      console.log('Headers:', headers);
+      
+      // Handle redirects
+      if (statusCode >= 300 && statusCode < 400 && headers.location) {
+        console.log(`Redirecting to: ${headers.location}`);
+        return fetchPage(headers.location).then(resolve).catch(reject);
+      }
+      
+      // Check if successful
+      if (statusCode !== 200) {
+        return reject(new Error(`Status code: ${statusCode}`));
+      }
+      
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => resolve(data));
+    });
+    
+    req.on('error', reject);
+    req.end();
+  });
 }
 
-const dataFile = path.join(dataDir, 'okko-data.json');
-console.log(`Data file will be saved at: ${dataFile}`);
-
-// Initialize with empty data
-let currentData = { progress: { total: 0 }, timestamp: new Date().toISOString() };
-fs.writeFileSync(dataFile, JSON.stringify(currentData, null, 2));
-console.log('Data file initialized');
-
-// Connect to Socket.IO
-console.log('Connecting to Socket.IO...');
-const socket = socketIO('https://dronopad.okko.ua', {
-  transports: ['websocket', 'polling'],
-  timeout: 10000
-});
-
-let dataReceived = false;
-
-socket.on('connect', () => {
-  console.log('Connected to Socket.IO server');
-});
-
-socket.on('connect_error', (error) => {
-  console.error('Connection error:', error);
-});
-
-// Listen for the 'total' event
-socket.on('total', (data) => {
-  console.log('Received total data:', JSON.stringify(data));
-  dataReceived = true;
-  
-  // Extract the data from the array structure
-  let progressData = currentData.progress || { total: 0 };
-  
-  // Check if data is an array and extract the first element
-  if (Array.isArray(data) && data.length > 0 && data[0].progress) {
-    progressData = data[0].progress;
-  } 
-  // Check if data is an object with progress directly
-  else if (data && data.progress) {
-    progressData = data.progress;
-  }
-  
-  const newData = {
-    progress: progressData,
-    timestamp: new Date().toISOString(),
-    rawData: data // Store the raw data for debugging
-  };
-  
-  fs.writeFileSync(dataFile, JSON.stringify(newData, null, 2));
-  console.log('Updated data file with total:', newData.progress.total);
-});
-
-// Set a timeout to ensure the script doesn't run indefinitely
-setTimeout(() => {
-  console.log('Timeout reached, disconnecting');
-  socket.disconnect();
-  
-  // If no new data was received, just update the timestamp
-  if (!dataReceived) {
-    console.log('No data received, updating timestamp only');
-    if (fs.existsSync(dataFile)) {
-      const existingData = JSON.parse(fs.readFileSync(dataFile));
-      existingData.timestamp = new Date().toISOString();
-      fs.writeFileSync(dataFile, JSON.stringify(existingData, null, 2));
-    }
-  }
-  
-  // Verify file exists before exiting
+async function main() {
+  // Initialize with empty or existing data
+  let currentData = { progress: { total: 0 }, timestamp: new Date().toISOString() };
   if (fs.existsSync(dataFile)) {
-    console.log(`Data file exists at: ${dataFile}`);
-    console.log(`File contents: ${fs.readFileSync(dataFile, 'utf8')}`);
-  } else {
-    console.error(`ERROR: Data file does not exist at: ${dataFile}`);
+    try {
+      currentData = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+    } catch (e) {}
   }
   
-  console.log('Script completed successfully');
-}, 30000); // 30 seconds timeout
+  try {
+    console.log('Fetching the Dronopad page...');
+    const html = await fetchPage('https://savelife.in.ua/dronopad/');
+    console.log(`Received HTML (${html.length} characters)`);
+    
+    // Try different ways to extract the Okko total amount
+    
+    // Method 1: Look for data-okko-total-amount attribute
+    let dataMatch = html.match(/data-okko-total-amount[^>]*>([0-9 ]+)</);
+    if (dataMatch && dataMatch[1]) {
+      const totalAmount = parseInt(dataMatch[1].replace(/\s+/g, ''));
+      console.log('Method 1 - Found total amount:', totalAmount);
+      
+      if (totalAmount > 0) {
+        currentData.progress = { total: totalAmount };
+        currentData.timestamp = new Date().toISOString();
+        currentData.source = 'html_scrape_method1';
+      }
+    }
+    
+    // Method 2: Look for JavaScript initialization with the value
+    if (currentData.progress.total === 0) {
+      dataMatch = html.match(/socket\.on\('total'[\s\S]*?total\s*=\s*([0-9]+)/);
+      if (dataMatch && dataMatch[1]) {
+        const totalAmount = parseInt(dataMatch[1]);
+        console.log('Method 2 - Found total amount:', totalAmount);
+        
+        if (totalAmount > 0) {
+          currentData.progress = { total: totalAmount };
+          currentData.timestamp = new Date().toISOString();
+          currentData.source = 'html_scrape_method2';
+        }
+      }
+    }
+    
+    // Method 3: Look for a JSON structure with the data
+    if (currentData.progress.total === 0) {
+      dataMatch = html.match(/progress["'\s]*:[\s]*{[^}]*total["'\s]*:[\s]*([0-9]+)/);
+      if (dataMatch && dataMatch[1]) {
+        const totalAmount = parseInt(dataMatch[1]);
+        console.log('Method 3 - Found total amount:', totalAmount);
+        
+        if (totalAmount > 0) {
+          currentData.progress = { total: totalAmount };
+          currentData.timestamp = new Date().toISOString();
+          currentData.source = 'html_scrape_method3';
+        }
+      }
+    }
+    
+    console.log('Final data to save:', currentData);
+    
+  } catch (error) {
+    console.error('Error fetching or processing the page:', error);
+  }
+  
+  // Save data file, even if we couldn't update it (to preserve timestamp)
+  fs.writeFileSync(dataFile, JSON.stringify(currentData, null, 2));
+  console.log('Data file saved');
+}
+
+main().catch(console.error);
