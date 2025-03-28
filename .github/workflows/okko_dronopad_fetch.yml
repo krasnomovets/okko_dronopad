@@ -21,6 +21,21 @@ jobs:
         run: |
           git config --global user.name 'GitHub Action'
           git config --global user.email 'action@github.com'
+          
+          # Create data directory if it doesn't exist (as a fallback)
+          mkdir -p data
+          
+          # Create an empty JSON file if it doesn't exist (as a fallback)
+          if [ ! -f data/okko-data.json ]; then
+            echo '{"progress":{"total":0},"timestamp":"'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"}' > data/okko-data.json
+            echo "Created empty data file as fallback"
+          fi
+          
+          # Stage the file
           git add data/okko-data.json
-          git diff --quiet && git diff --staged --quiet || git commit -m "Update Okko data"
+          
+          # Only commit if there are changes
+          git diff --staged --quiet || git commit -m "Update Okko data"
+          
+          # Push changes
           git push
