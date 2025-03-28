@@ -1,0 +1,25 @@
+name: Fetch Okko Data
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Run every 30 minutes
+
+jobs:
+  fetch-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-node@v2
+        with:
+          node-version: '14'
+      - name: Install dependencies
+        run: npm install socket.io-client
+      - name: Fetch data
+        run: node .github/scripts/fetch-okko-data.js
+      - name: Commit and push if changed
+        run: |
+          git config --global user.name 'GitHub Action'
+          git config --global user.email 'action@github.com'
+          git add data/okko-data.json
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update Okko data"
+          git push
