@@ -42,13 +42,27 @@ socket.on('connect_error', (error) => {
 socket.on('total', (data) => {
   console.log('Received total data:', JSON.stringify(data));
   dataReceived = true;
+  
+  // Extract the data from the array structure
+  let progressData = currentData.progress || { total: 0 };
+  
+  // Check if data is an array and extract the first element
+  if (Array.isArray(data) && data.length > 0 && data[0].progress) {
+    progressData = data[0].progress;
+  } 
+  // Check if data is an object with progress directly
+  else if (data && data.progress) {
+    progressData = data.progress;
+  }
+  
   const newData = {
-    ...data,
-    timestamp: new Date().toISOString()
+    progress: progressData,
+    timestamp: new Date().toISOString(),
+    rawData: data // Store the raw data for debugging
   };
+  
   fs.writeFileSync(dataFile, JSON.stringify(newData, null, 2));
-  console.log('Updated data file');
-  socket.disconnect();
+  console.log('Updated data file with total:', newData.progress.total);
 });
 
 // Set a timeout to ensure the script doesn't run indefinitely
